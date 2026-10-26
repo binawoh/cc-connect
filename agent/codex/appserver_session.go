@@ -247,7 +247,7 @@ func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []stri
 }
 
 func (s *appServerSession) connect() error {
-	args := append(append([]string(nil), s.cliExtraArgs...), "app-server")
+	args := appServerCommandArgs(s.cliExtraArgs)
 	if strings.TrimSpace(s.url) != "" {
 		args = append(args, "--listen", strings.TrimSpace(s.url))
 	}

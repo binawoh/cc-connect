@@ -38,6 +38,32 @@ func TestAppServerSession_HonorsConfiguredCommandAndArgs(t *testing.T) {
 	}
 }
 
+// Codex 0.162 discards the leading -c group when the app-server subcommand
+// also has -c options (such as our model override). Exercise the real launch
+// path and require custom MCP options in the same group as the model.
+func TestAppServerSession_ConfigOverridesSurviveModelOptions(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const setting = `mcp_servers.joy_workspaces.command="test-node"`
+	for _, flags := range [][]string{{"-c", setting}, {"--config", setting}, {"--config=" + setting}} {
+		t.Run(flags[0], func(t *testing.T) {
+			t.Setenv("CC_CODEX_APP_SERVER_TEST_HELPER", "1")
+			t.Setenv("CC_CODEX_EXPECT_APP_SERVER_CONFIG", setting)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			prefix := append([]string{"-test.run=^TestAppServerCommandHelper$", "--", "custom-prefix"}, flags...)
+			a := &Agent{cmd: executable, cliExtraArgs: prefix, backend: "app_server", appServerURL: "stdio://", workDir: t.TempDir(), activeIdx: -1, model: "test-model"}
+			session, err := a.StartSession(ctx, "")
+			if err != nil {
+				t.Fatalf("MCP configuration must reach the app-server option group: %v", err)
+			}
+			defer session.Close()
+		})
+	}
+}
+
 func TestAppServerCommandHelper(t *testing.T) {
 	if os.Getenv("CC_CODEX_APP_SERVER_TEST_HELPER") != "1" {
 		return
@@ -45,6 +71,12 @@ func TestAppServerCommandHelper(t *testing.T) {
 	i := slices.Index(os.Args, "custom-prefix")
 	if i < 0 || i+1 >= len(os.Args) || os.Args[i+1] != "app-server" {
 		os.Exit(2)
+	}
+	if setting := os.Getenv("CC_CODEX_EXPECT_APP_SERVER_CONFIG"); setting != "" {
+		args := os.Args[i+2:]
+		if (!slices.Contains(args, setting) && !slices.Contains(args, "--config="+setting)) || !slices.Contains(args, `model="test-model"`) {
+			os.Exit(4)
+		}
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
