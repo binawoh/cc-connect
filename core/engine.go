@@ -545,8 +545,9 @@ type interactiveState struct {
 	// events between user-initiated turns (e.g. background task completions).
 	// Cancel unsolicitedCancel to stop the reader; wait on unsolicitedDone
 	// to confirm it has exited before starting a new foreground turn.
-	unsolicitedCancel context.CancelFunc // nil when no reader is running
-	unsolicitedDone   chan struct{}      // closed when the reader goroutine exits
+	unsolicitedCancel       context.CancelFunc // nil when no reader is running
+	unsolicitedDone         chan struct{}      // closed when the reader goroutine exits
+	backgroundReaderStarted bool               // one reader per agent session, independent of turns
 
 	// agentSessionIdleCancel 取消当前会话的 idle 关闭计时器。
 	agentSessionIdleCancel context.CancelFunc
@@ -681,6 +682,7 @@ type modelSwitchState struct {
 
 // pendingPermission represents a permission request waiting for user response.
 type pendingPermission struct {
+	Background      bool // ordinary chat can continue while a worker awaits approval
 	RequestID       string
 	ToolName        string
 	ToolInput       map[string]any
@@ -3448,6 +3450,9 @@ found:
 		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionDenied))
 	} else {
+		if pending.Background {
+			return false
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionHint))
 		return true
 	}
@@ -3707,8 +3712,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	turnStart := time.Now()
 
-	e.i18n.DetectAndSet(msg.Content)
-	session.AddHistory("user", msg.Content)
+	if msg.Synthetic {
+		session.AddHistory("system", msg.Content)
+	} else {
+		e.i18n.DetectAndSet(msg.Content)
+		session.AddHistory("user", msg.Content)
+	}
 	// Persist user message immediately so crashes between user input and
 	// assistant reply don't lose it (the assistant-side Save below depends
 	// on the turn completing without a process crash).
@@ -3748,6 +3757,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		return
 	}
 	e.cancelAgentSessionIdleClose(state)
+	e.startBackgroundReader(state, session, sessions, interactiveKey, msg.SessionKey)
 
 	if workspaceDir != "" && e.workspacePool != nil {
 		ws := e.workspacePool.GetOrCreate(workspaceDir)
@@ -5457,9 +5467,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				Questions:    event.Questions,
 				Resolved:     make(chan struct{}),
 			}
-			state.mu.Lock()
-			state.pending = pending
-			state.mu.Unlock()
+			if !e.installPendingPermission(state, pending) {
+				return
+			}
 
 			if isAskQuestion {
 				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)

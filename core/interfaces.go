@@ -426,6 +426,15 @@ type AgentSession interface {
 	Close() error
 }
 
+// BackgroundEventSource separates delegated-task lifecycle events from the
+// foreground turn stream. One engine reader owns this channel for the session's
+// lifetime; turn handoffs must never drain or discard its events.
+// Supported events are EventFollowUp and EventPermissionRequest. The agent owns
+// the channel and must stop producing when its session closes.
+type BackgroundEventSource interface {
+	BackgroundEvents() <-chan Event
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

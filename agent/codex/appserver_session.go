@@ -152,7 +152,10 @@ type appServerSession struct {
 	codexHome      string
 	promptPreamble string
 
-	events chan core.Event
+	events                 chan core.Event
+	backgroundEvents       chan core.Event
+	subagentFollowUp       bool
+	completedSubagentItems map[string]bool // readLoop owns notification handling
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -191,7 +194,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, subagentFollowUp ...bool) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
@@ -205,6 +208,8 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		codexHome:        strings.TrimSpace(codexHome),
 		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
 		events:           make(chan core.Event, 128),
+		backgroundEvents: make(chan core.Event, 128),
+		subagentFollowUp: len(subagentFollowUp) > 0 && subagentFollowUp[0],
 		ctx:              sessionCtx,
 		cancel:           cancel,
 		pending:          make(map[int64]chan rpcResponseEnvelope),
@@ -244,6 +249,16 @@ func (s *appServerSession) connect() error {
 	}
 	if effort := strings.TrimSpace(s.effort); effort != "" {
 		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
+	}
+	if s.subagentFollowUp {
+		// Keep workers on this project's model/effort rather than unrelated
+		// global subagent defaults. Explicit spawn arguments still take precedence.
+		if s.model != "" {
+			args = append(args, "-c", fmt.Sprintf("agents.default_subagent_model=%q", s.model))
+		}
+		if s.effort != "" {
+			args = append(args, "-c", fmt.Sprintf("agents.default_subagent_reasoning_effort=%q", s.effort))
+		}
 	}
 	if provider := strings.TrimSpace(s.modelProvider); provider != "" {
 		args = append(args, "-c", fmt.Sprintf("model_provider=%q", provider))
@@ -607,8 +622,7 @@ func (s *appServerSession) handleApprovalRequest(rawID json.RawMessage, method s
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
-	s.emit(core.Event{
+	s.emitPermissionRequest(params, core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
 		ToolName:     toolName,
@@ -654,8 +668,7 @@ func (s *appServerSession) handlePermissionsApproval(rawID json.RawMessage, para
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
-	s.emit(core.Event{
+	s.emitPermissionRequest(params, core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
 		ToolName:     "Permissions",
@@ -722,8 +735,7 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
-	s.emit(core.Event{
+	s.emitPermissionRequest(rawInput, core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
 		ToolName:     "AskUserQuestion",
@@ -964,6 +976,9 @@ func (s *appServerSession) Close() error {
 
 	s.closeOnce.Do(func() {
 		close(s.events)
+		if s.backgroundEvents != nil {
+			close(s.backgroundEvents)
+		}
 	})
 	return nil
 }
@@ -1100,6 +1115,14 @@ func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
 }
 
 func (s *appServerSession) handleNotification(method string, paramsRaw json.RawMessage) {
+	// All root turn state, usage, text and errors belong to this thread only.
+	// Codex also delivers worker notifications on the same stdio connection.
+	var scope struct {
+		ThreadID string `json:"threadId"`
+	}
+	if json.Unmarshal(paramsRaw, &scope) == nil && s.isChildThread(scope.ThreadID) {
+		return
+	}
 	switch method {
 	case "turn/started":
 		var notif turnNotification
@@ -1168,7 +1191,7 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	}
 
 	switch itemType {
-	case "agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction":
+	case "agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction", "subAgentActivity":
 		return
 	}
 
@@ -1205,6 +1228,9 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	}
 
 	switch itemType {
+	case "subAgentActivity":
+		s.handleSubagentActivity(item)
+
 	case "reasoning":
 		text := appServerReasoningText(item)
 		if text != "" {

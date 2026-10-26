@@ -1605,6 +1605,15 @@ app_secret = "your-feishu-app-secret"
 # type = "codex"
 #
 # [projects.agent.options]
+# Optional persistent main chat + delegated worker sessions (Codex app-server).
+# 可选：主会话持续聊天，子会话后台工作；完成后自动唤醒主会话汇报。
+# backend = "app_server"
+# app_server_url = "stdio"
+# subagent_follow_up = true  # default false; requires native subAgentActivity notifications
+# Workers default to this project's model / reasoning_effort. Ask the main agent
+# to dispatch work, finish its turn without waiting, and summarize child results.
+# Worker tool approvals still require the existing permission policy.
+# This does not persist in-flight workers across a bridge/process restart.
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #

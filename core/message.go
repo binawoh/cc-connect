@@ -394,6 +394,7 @@ type Message struct {
 	// "allow"/"deny" typed by a real user must NOT set this flag — they
 	// continue to flow through the regular message handler.
 	IsPermissionResponse bool
+	Synthetic            bool // bridge-generated follow-up, not a new instruction from the user
 	// UserMessageTimeMs is the platform message creation time in Unix milliseconds
 	// when known (e.g. Feishu im.message.message_received create_time). Used to
 	// drop late redeliveries that reuse a new message_id but an older create_time
@@ -412,6 +413,7 @@ const (
 	EventError             EventType = "error"              // error occurred
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
 	EventThinking          EventType = "thinking"           // thinking/processing status
+	EventFollowUp          EventType = "follow_up"          // delegated work needs a new parent turn
 )
 
 // UserQuestion represents a structured question from AskUserQuestion.

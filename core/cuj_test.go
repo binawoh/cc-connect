@@ -40,6 +40,35 @@ import (
 	"time"
 )
 
+func TestCUJ_BG1_ChatContinuesWhileDelegatedWorkCompletes(t *testing.T) {
+	env, worker := newBackgroundTestEnv(t)
+	key := env.userSends("boss", "start work")
+	env.waitFor("dispatch reply", 2*time.Second, func() bool { return env.sentContains("WORK_DISPATCHED") })
+	env.userSends("boss", "slow chat")
+	select {
+	case <-worker.chatStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("chat did not start while work was running")
+	}
+	worker.background <- Event{Type: EventFollowUp, Content: "background completion", Synthetic: true}
+	if env.sentContains("WORK_SUMMARY") {
+		t.Fatal("completion interrupted active chat")
+	}
+	close(worker.releaseChat)
+	env.waitFor("chat then automatic work summary", 3*time.Second, func() bool { return env.sentContains("WORK_SUMMARY") })
+	sent := strings.Join(env.plat.getSent(), "\n")
+	if strings.Index(sent, "CHAT_WHILE_WORKING") > strings.Index(sent, "WORK_SUMMARY") {
+		t.Fatalf("wrong reply order: %s", sent)
+	}
+	env.userSends("boss", "continue chatting")
+	env.waitFor("third chat reply", 2*time.Second, func() bool { return env.sentContains("CHAT_OK") })
+	for _, entry := range env.activeSession(key).GetHistory(0) {
+		if entry.Content == "background completion" && entry.Role == "user" {
+			t.Fatal("worker completion recorded as user instruction")
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helper types: cujAgent + cujAgentSession give per-CUJ control over what the
 // agent "replies" for each user prompt, without bringing up a real LLM.
