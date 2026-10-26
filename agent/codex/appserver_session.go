@@ -182,6 +182,7 @@ type appServerSession struct {
 	stateMu      sync.Mutex
 	pendingMsgs  []string
 	currentTurn  string
+	compacting   bool // manual compaction must wait for the terminal turn status
 	preambleSent bool
 
 	runtimeMu sync.RWMutex
@@ -459,6 +460,9 @@ func (s *appServerSession) storeContextUsage(usage *core.ContextUsage) {
 func (s *appServerSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
+	}
+	if strings.TrimSpace(prompt) == "/compact" && len(images) == 0 && len(files) == 0 {
+		return s.startCompaction()
 	}
 
 	if len(files) > 0 {
@@ -1149,6 +1153,21 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			s.stateMu.Lock()
+			compacting := s.compacting
+			s.stateMu.Unlock()
+			if compacting && notif.Turn.Status == "failed" {
+				s.stateMu.Lock()
+				s.compacting = false
+				s.currentTurn = ""
+				s.stateMu.Unlock()
+				message := "codex context compaction failed"
+				if notif.Turn.Error != nil {
+					message = notif.Turn.Error.Message
+				}
+				s.emitError(fmt.Errorf("%s", message))
+				return
+			}
 			s.completeTurn()
 		}
 
@@ -1160,6 +1179,12 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			} `json:"status"`
 		}
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Status.Type == "idle" {
+			s.stateMu.Lock()
+			compacting := s.compacting
+			s.stateMu.Unlock()
+			if compacting {
+				return
+			}
 			// In codex 0.125+, thread going idle signals turn completion.
 			s.completeTurn()
 		}
@@ -1541,6 +1566,7 @@ func (s *appServerSession) completeTurn() {
 		return
 	}
 	s.currentTurn = ""
+	s.compacting = false
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
