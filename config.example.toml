@@ -295,8 +295,7 @@ level = "info" # debug, info, warn, error
 # max_per_second = 25
 # [outgoing_rate_limit.platforms.feishu]
 # max_per_second = 5
-# Weixin (ilink) sendmessage throttles the bot after a short burst (ret=-2
-# "prepare failed", penalty on the order of an hour). Pace sends to avoid it:
+# Optional pacing for Weixin sends / 可选的微信发送间隔限制:
 # [outgoing_rate_limit.platforms.weixin]
 # max_per_second = 0.5
 # burst = 1
@@ -1478,16 +1477,13 @@ app_secret = "your-feishu-app-secret"
 # proxy_username = ""
 # proxy_password = ""
 #
-# Send-volume quota vs ilink's burst throttle (sendMessage ret=-2 "prepare failed"):
-# the gateway throttles the bot after roughly 5-6 separate messages within a short
-# window (multi-chunk sends are fine), and the penalty escalates with every attempt
-# made while active. The quota paces separate messages so the bot stays below the
-# trigger. 0 disables the quota.
-# 发送量配额（防 ilink 突发节流 ret=-2）：网关在短窗口内约 5-6 条独立消息即节流
-# （多切块发送不计数），且节流期内每次尝试都会升级惩罚。配额对独立消息限速，
-# 使其低于触发阈值。设为 0 关闭配额。
-# burst_limit = 4           # max separate messages per window / 每窗口最多独立消息数
-# burst_window_secs = 86400 # window length (default 24h) / 窗口时长（秒，默认24小时）
+# Optional local send-volume quota, disabled by default. This is not an ilink
+# service limit. A positive limit rejects further logical messages (including
+# permission prompts) once reached; chunks count as one logical message.
+# 可选的本地发送配额，默认关闭，并非微信官方额度。设为正数后，达到上限会拒绝
+# 后续消息（包括授权提示）；一条消息的多个切块合计一次。设为 0 关闭本地配额。
+# burst_limit = 0           # 0 = disabled (default) / 默认 0，关闭本地配额
+# burst_window_secs = 86400 # accounting window if enabled / 启用配额后的统计窗口（秒）
 
 # -----------------------------------------------------------------------------
 # Tencent Yuanbao (yuanbao.tencent.com bot platform)

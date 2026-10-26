@@ -30,15 +30,11 @@ const (
 	// weixinChunkSendDelay is the delay between sending message chunks to avoid rate limiting.
 	weixinChunkSendDelay = 100 * time.Millisecond
 
-	// Send-volume quota that keeps the bot under ilink's burst throttle
-	// (sendMessage ret=-2 "prepare failed"). Live testing showed the gateway
-	// throttles the bot after roughly 5-6 separate messages within a short window,
-	// and that the penalty is escalated by every send attempt made while it is
-	// active. We pace separate messages (not chunks: multi-chunk sends are fine)
-	// to stay well below the trigger. Configurable via burst_limit /
-	// burst_window_secs platform options.
-	defaultBurstLimit      = 4     // max separate messages per window
-	defaultBurstWindowSecs = 86400 // window length (24h: ilink budgets ~5-6 sends/day)
+	// Optional local quota, not a documented ilink service limit. Defaulting to
+	// four sends per day blocks normal conversations and permission prompts.
+	// Enable only by explicitly setting burst_limit to a positive value.
+	defaultBurstLimit      = 0
+	defaultBurstWindowSecs = 86400 // accounting window for an explicitly enabled quota
 	// typingTicketTTL is how long a cached typing ticket remains valid.
 	typingTicketTTL = 10 * time.Minute
 	// typingRepeatInterval is how often to resend the typing status to keep it alive.
@@ -94,7 +90,7 @@ type Platform struct {
 	typingMu      sync.RWMutex
 	typingTickets map[string]typingTicketEntry // peerUserID → cached ticket
 
-	// Send-volume quota guarding against ilink's burst throttle (see constants).
+	// Optional local send-volume quota (see constants).
 	sendQuotaMu     sync.Mutex
 	sendQuotaTimes  []time.Time
 	sendQuotaLimit  int
@@ -670,17 +666,9 @@ func (p *Platform) refreshTypingTicket(ctx context.Context, peerID, contextToken
 	}()
 }
 
-// checkSendQuota enforces the bot's separate-message budget so ilink's
-// sendmessage throttle (ret=-2 "prepare failed") is not triggered. Live testing
-// showed the gateway throttles a bot after roughly 5-6 separate messages per
-// long window (about a day; matches the 24h context TTL), regardless of pacing,
-// and that attempts made during the penalty escalate it. Multi-chunk sends do
-// not count (a chunked message is one logical message). This quota counts
-// logical messages in a sliding window and FAILS FAST once the budget is
-// exhausted — waiting for the window to slide (up to a day) is useless, and the
-// fail-fast philosophy (see sendChunk) applies: do not keep hammering a
-// throttled bot. Configure via burst_limit / burst_window_secs platform
-// options. A limit of 0 disables the quota.
+// checkSendQuota enforces an explicitly configured local logical-message
+// budget. A limit of 0 disables it. Exhaustion fails before any API request;
+// it does not establish that ilink has rejected or rate-limited the bot.
 func (p *Platform) checkSendQuota(ctx context.Context) error {
 	if p.sendQuotaLimit <= 0 || p.sendQuotaWindow <= 0 {
 		return nil
@@ -697,8 +685,8 @@ func (p *Platform) checkSendQuota(ctx context.Context) error {
 	p.sendQuotaTimes = kept
 	if len(p.sendQuotaTimes) >= p.sendQuotaLimit {
 		p.sendQuotaMu.Unlock()
-		return fmt.Errorf("weixin: send budget exhausted (%d messages in the last %s); "+
-			"ilink throttles the bot after roughly 5-6 sends per window — reduce messages or re-login later", p.sendQuotaLimit, p.sendQuotaWindow)
+		return fmt.Errorf("weixin: local send budget exhausted (%d messages in the last %s); "+
+			"configured by burst_limit and burst_window_secs, request not sent to ilink", p.sendQuotaLimit, p.sendQuotaWindow)
 	}
 	p.sendQuotaTimes = append(p.sendQuotaTimes, now)
 	p.sendQuotaMu.Unlock()
@@ -743,9 +731,7 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 				"peer", rc.peerUserID,
 				"failed_chunk", fmt.Sprintf("%d/%d", i+1, total),
 				"error", err)
-			// Notify user that message delivery was incomplete, unless the failure
-			// is the ilink throttle: the notice send would be refused too, only
-			// adding another throttled request.
+			// Avoid another send after a prepare failure, which could be a throttle.
 			if !isSendThrottled(err) {
 				notice := "⚠️ 消息发送不完整，请在终端查看完整结果。"
 				noticeID := "cc-" + randomHex(6)
@@ -759,17 +745,13 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 	return nil
 }
 
-// isSendThrottled reports whether err is ilink sendmessage's burst-throttle
-// response (ret=-2 "prepare failed"). This is a bot-wide rate-limit penalty, not a
-// context_token problem: the gateway accepts any (or no) context_token on sends.
+// isSendThrottled conservatively treats ret=-2 ("prepare failed") as a possible
+// throttle to avoid follow-up sends. The response alone does not prove the cause.
 func isSendThrottled(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "ret=-2")
 }
 
-// sendChunk sends a single chunk. If ilink throttles the send (ret=-2
-// "prepare failed"), it fails fast instead of retrying: live testing showed the
-// penalty is escalated by every send attempt made while it is active, so retrying
-// (e.g. the old 3×500ms loop plus the extra notice send) only prolongs the outage.
+// sendChunk sends once and returns any failure without automatic retries.
 func (p *Platform) sendChunk(ctx context.Context, rc *replyContext, chunk string) error {
 	clientID := "cc-" + randomHex(6)
 	err := p.api.sendText(ctx, rc.peerUserID, chunk, rc.contextToken, clientID)
@@ -777,8 +759,7 @@ func (p *Platform) sendChunk(ctx context.Context, rc *replyContext, chunk string
 		return nil
 	}
 	if isSendThrottled(err) {
-		return fmt.Errorf("weixin: sendMessage throttled by ilink (ret=-2); "+
-			"the bot is rate-limited and sending during the penalty escalates it, retry the message later: %w", err)
+		return fmt.Errorf("weixin: sendMessage declined by ilink (ret=-2), not retried: %w", err)
 	}
 	return err
 }

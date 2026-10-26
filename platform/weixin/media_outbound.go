@@ -132,8 +132,7 @@ func (p *Platform) sendSingleItem(ctx context.Context, rc *replyContext, item me
 		return nil
 	}
 	if isSendThrottled(err) {
-		return fmt.Errorf("weixin: sendMessage throttled by ilink (ret=-2); "+
-			"the bot is rate-limited and sending during the penalty escalates it, retry the message later: %w", err)
+		return fmt.Errorf("weixin: sendMessage declined by ilink (ret=-2), not retried: %w", err)
 	}
 	return err
 }
@@ -155,7 +154,6 @@ func buildVideoMessageItem(ref *cdnUploadedRef) messageItem {
 		},
 	}
 }
-
 
 // SendImage implements core.ImageSender.
 func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAttachment) error {
