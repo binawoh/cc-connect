@@ -67,5 +67,34 @@ func TestAppServerCommandHelper(t *testing.T) {
 		response, _ := json.Marshal(map[string]any{"id": *req.ID, "result": result})
 		fmt.Println(string(response))
 	}
+	if marker := os.Getenv("CC_CODEX_GRACEFUL_CLOSE_MARKER"); marker != "" {
+		time.Sleep(100 * time.Millisecond)
+		if err := os.WriteFile(marker, []byte("graceful"), 0600); err != nil {
+			os.Exit(3)
+		}
+	}
 	os.Exit(0)
+}
+
+func TestAppServerSession_CloseLetsServerCleanUpBeforeCancellation(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := t.TempDir() + "/closed"
+	t.Setenv("CC_CODEX_APP_SERVER_TEST_HELPER", "1")
+	t.Setenv("CC_CODEX_GRACEFUL_CLOSE_MARKER", marker)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	a := &Agent{cmd: executable, cliExtraArgs: []string{"-test.run=^TestAppServerCommandHelper$", "--", "custom-prefix"}, backend: "app_server", appServerURL: "stdio://", workDir: t.TempDir(), activeIdx: -1}
+	s, err := a.StartSession(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("server was killed before it could clean up its tool processes")
+	}
 }

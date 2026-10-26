@@ -2857,6 +2857,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if content == "" && msg.ExtraContent == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil {
 		return
 	}
+	// Commands also count as conversation activity without waking a sleeping agent.
+	defer e.refreshAgentSessionIdleCloseForMessage(msg.SessionKey)
 
 	// Resolve aliases on user text BEFORE merging ExtraContent, so reply
 	// quotes and platform context survive alias resolution (PR #420 fix).
@@ -4299,13 +4301,17 @@ func (e *Engine) cancelAgentSessionIdleClose(state *interactiveState) {
 	}
 }
 
-func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interactiveState) {
+func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interactiveState, after ...time.Duration) {
 	if state == nil {
 		return
 	}
 	timeout := time.Duration(e.agentSessionIdleTimeoutNanos.Load())
 	if timeout <= 0 {
 		return
+	}
+	delay := timeout
+	if len(after) > 0 && after[0] > 0 {
+		delay = after[0]
 	}
 
 	e.cancelAgentSessionIdleClose(state)
@@ -4327,7 +4333,7 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 	state.mu.Unlock()
 
 	go func() {
-		timer := time.NewTimer(timeout)
+		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
@@ -4359,6 +4365,24 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 		state.mu.Unlock()
 		e.interactiveMu.Unlock()
 		return
+	}
+	if activity, ok := state.agentSession.(SessionActivityProvider); ok {
+		lastActivity, busy := activity.SessionActivity()
+		delay := time.Duration(0)
+		if busy {
+			delay = timeout
+			if delay > time.Minute {
+				delay = time.Minute
+			}
+		} else if !lastActivity.IsZero() {
+			delay = timeout - time.Since(lastActivity)
+		}
+		if delay > 0 {
+			state.mu.Unlock()
+			e.interactiveMu.Unlock()
+			e.scheduleAgentSessionIdleClose(sessionKey, state, delay)
+			return
+		}
 	}
 	agentSession = state.agentSession
 	state.agentSession = nil

@@ -40,6 +40,40 @@ import (
 	"time"
 )
 
+func TestCUJ_BG2_ColdWarmIdleAndResumeSameConversation(t *testing.T) {
+	env := newCUJEnv(t)
+	a := &idleResumeAgent{}
+	env.engine.agent = a
+	env.engine.SetAgentSessionIdleTimeout(250 * time.Millisecond)
+	t.Cleanup(func() { env.engine.cancel(); env.engine.cleanupInteractiveState("test:idle") })
+	key := env.userSends("idle", "first chat")
+	env.waitFor("cold reply", 2*time.Second, func() bool { return len(env.plat.getSent()) == 1 })
+	conversation := env.activeSession(key)
+	env.userSends("idle", "warm chat")
+	env.waitFor("warm reply", 2*time.Second, func() bool { return len(env.plat.getSent()) == 2 })
+	if len(a.resumeIDs()) != 1 {
+		t.Fatal("second chat launched a new process")
+	}
+	env.waitFor("idle process exit", 2*time.Second, func() bool {
+		env.engine.interactiveMu.Lock()
+		defer env.engine.interactiveMu.Unlock()
+		return env.engine.interactiveStates[key] == nil
+	})
+	env.userSends("idle", "resume chat")
+	env.waitFor("resumed reply", 2*time.Second, func() bool { return len(env.plat.getSent()) == 3 })
+	ids := a.resumeIDs()
+	if len(ids) != 2 || ids[1] != "cuj-agent-session" {
+		t.Fatalf("did not resume saved native session: %v", ids)
+	}
+	if env.activeSession(key) != conversation {
+		t.Fatal("idle sleep replaced the conversation")
+	}
+	history := conversation.GetHistory(0)
+	if len(history) < 6 || history[0].Content != "first chat" {
+		t.Fatal("history was lost on resume")
+	}
+}
+
 func TestCUJ_BG1_ChatContinuesWhileDelegatedWorkCompletes(t *testing.T) {
 	env, worker := newBackgroundTestEnv(t)
 	key := env.userSends("boss", "start work")

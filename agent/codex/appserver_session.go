@@ -181,11 +181,13 @@ type appServerSession struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	stateMu      sync.Mutex
-	pendingMsgs  []string
-	currentTurn  string
-	compacting   bool // manual compaction must wait for the terminal turn status
-	preambleSent bool
+	stateMu         sync.Mutex
+	pendingMsgs     []string
+	currentTurn     string
+	compacting      bool // manual compaction must wait for the terminal turn status
+	lastActivity    time.Time
+	activeSubagents map[string]string // thread -> running turn; protected by stateMu
+	preambleSent    bool
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -469,6 +471,7 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
+	s.touchActivity()
 	if strings.TrimSpace(prompt) == "/compact" && len(images) == 0 && len(files) == 0 {
 		return s.startCompaction()
 	}
@@ -962,34 +965,41 @@ func (s *appServerSession) Alive() bool {
 }
 
 func (s *appServerSession) Close() error {
-	s.alive.Store(false)
-	s.cancel()
-
-	s.procMu.Lock()
-	if s.stdin != nil {
-		_ = s.stdin.Close()
-		s.stdin = nil
-	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-	}
-	s.procMu.Unlock()
-
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-	}
-
 	s.closeOnce.Do(func() {
-		close(s.events)
-		if s.backgroundEvents != nil {
-			close(s.backgroundEvents)
+		s.alive.Store(false)
+		// EOF lets Codex shut down its MCP/tool processes. Cancelling the
+		// CommandContext first kills it before that cleanup can run.
+		s.procMu.Lock()
+		if s.stdin != nil {
+			_ = s.stdin.Close()
+			s.stdin = nil
+		}
+		s.procMu.Unlock()
+		done := make(chan struct{})
+		go func() { s.wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			s.cancel()
+			s.procMu.Lock()
+			if s.cmd != nil && s.cmd.Process != nil {
+				_ = s.cmd.Process.Kill()
+			}
+			s.procMu.Unlock()
+		}
+		s.cancel()
+		finish := func() {
+			close(s.events)
+			if s.backgroundEvents != nil {
+				close(s.backgroundEvents)
+			}
+		}
+		select {
+		case <-done:
+			finish()
+		case <-time.After(2 * time.Second):
+			// Never close event channels while a reader can still emit.
+			go func() { <-done; finish() }()
 		}
 	})
 	return nil
@@ -1127,6 +1137,7 @@ func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
 }
 
 func (s *appServerSession) handleNotification(method string, paramsRaw json.RawMessage) {
+	s.trackSessionActivity(method, paramsRaw)
 	// All root turn state, usage, text and errors belong to this thread only.
 	// Codex also delivers worker notifications on the same stdio connection.
 	var scope struct {

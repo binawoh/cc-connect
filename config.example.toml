@@ -188,6 +188,10 @@ level = "info" # debug, info, warn, error
 # 与 reset_on_idle_mins 不同，此项默认禁用，因为关闭 live agent 进程属于显式开启的资源优化。
 # [[projects]]
 # agent_session_idle_timeout_mins = 30
+# Codex app-server also tracks delegated work: running workers prevent sleep,
+# and their activity postpones reclamation. Use reset_on_idle_mins = 0 to keep
+# resuming the same saved conversation after the process sleeps.
+# Codex 子任务执行期间不休眠；设 reset_on_idle_mins = 0 可在唤醒后续接原会话。
 
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)

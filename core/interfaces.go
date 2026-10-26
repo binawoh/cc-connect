@@ -435,6 +435,13 @@ type BackgroundEventSource interface {
 	BackgroundEvents() <-chan Event
 }
 
+// SessionActivityProvider lets idle reclamation account for work that is not
+// part of the foreground chat turn, such as delegated agents. The snapshot
+// must be local and non-blocking; transport heartbeats are not activity.
+type SessionActivityProvider interface {
+	SessionActivity() (lastActivity time.Time, busy bool)
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"
